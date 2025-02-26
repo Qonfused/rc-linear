@@ -1,0 +1,33 @@
+# Filesystem cache
+.DS_Store
+
+# Bazel build directories
+/bazel-*
+
+# Bazel output directories that might appear in subdirectories
+**/bazel-out/
+**/.build/
+
+# IDE specific (if using Bazel plugins)
+.ijwb/
+.clwb/
+.aswb/
+
+# Bazel convenience symlinks
+/bazel-bin
+/bazel-testlogs
+/bazel-out
+/bazel-rc-linear
+
+# Temporary Bazel files
+.reference
+.bazelrc.user
+
+# LaTeX output
+paper/*
+!paper/*.tex
+!paper/*.bib
+!paper/*.pdf
+
+# Script outputs
+/*.png

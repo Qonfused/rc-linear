@@ -1,0 +1,49 @@
+"""Bazel dependencies for the rc_linear module."""
+
+module(
+  name = "rc_linear",
+  version = "0.1.0",
+)
+
+# Hedron's Compile Commands Extractor for Bazel
+#
+# A Bazel rule to generate compile_commands.json for use with clangd, ccls, etc.
+# Useful for C++ development with Bazel in editors like VSCode, Vim, etc.
+# https://github.com/hedronvision/bazel-compile-commands-extractor
+#
+# Generate compile_commands.json for use with clangd:
+# $ bazel run @hedron_compile_commands//:refresh_all
+#
+bazel_dep(name = "hedron_compile_commands", dev_dependency = True)
+git_override(
+  module_name = "hedron_compile_commands",
+  remote = "https://github.com/hedronvision/bazel-compile-commands-extractor.git",
+  commit = "4f28899228fb3ad0126897876f147ca15026151e", # 2024-10-07
+)
+
+git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
+
+# GLM: OpenGL Mathematics
+#
+# Provides a header-only C++ math library for graphics software based on the
+# OpenGL Shading Language (GLSL) specifications.
+# https://glm.g-truc.net/
+#
+git_repository(
+  name = "glm",
+  commit = "2d4c4b4dd31fde06cfffad7915c2b3006402322f",
+  remote = "https://github.com/g-truc/glm.git",
+  build_file = "//third_party:glm.BUILD",
+)
+
+# LodePNG
+#
+# A PNG image decoder and encoder written in C and C++.
+# https://lodev.org/lodepng/
+#
+git_repository(
+  name = "lodepng",
+  commit = "0b1d9ccfc2093e5d6620cd9a11d03ee6ff6705f5",
+  remote = "https://github.com/lvandeve/lodepng.git",
+  build_file = "//third_party:lodepng.BUILD",
+)
