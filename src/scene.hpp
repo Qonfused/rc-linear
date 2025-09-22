@@ -1,8 +1,8 @@
 #pragma once
+
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
-// #include "texture.hpp"
-#include "texture_simd.hpp"
+#include "texture.hpp"
 
 inline float sdBox(glm::vec2 p, glm::vec2 b) {
   glm::vec2 d = glm::abs(p) - b;
@@ -23,7 +23,7 @@ inline void sdCircle(
     glm::vec2 position,
     float radius,
     glm::vec4 color) {
-  if (glm::length(position) - radius < radius) radiance = color;
+  if (glm::length(position) - radius < 0.0f) radiance = color;
 }
 
 inline void render_scene(Texture2D& dst, glm::vec2 resolution) {
@@ -38,7 +38,7 @@ inline void render_scene(Texture2D& dst, glm::vec2 resolution) {
       glm::vec2 edge(0.0f, resolution.y * 0.5f);
       glm::vec2 corner(resolution.x * 0.5f, resolution.y * 0.5f);
 
-      sdCircle(radiance, center + glm::vec2(0.0f, 0.0f), 7.5f, glm::vec4(1, 1, 1, 1));
+      sdCircle(radiance, center + glm::vec2(0.0f, 0.0f), 15.0f, glm::vec4(1, 1, 1, 1));
       // sdRectangle(radiance, center + glm::vec2(-50.0f, 0.0f), glm::vec2(0.005f, 100.0f), glm::vec4(0, 0, 0, 1));
       // sdRectangle(radiance, center + edge, glm::vec2(100.0f, 5.0f), glm::vec4(0, 0, 0, 1));
       // sdRectangle(radiance, center + corner - glm::vec2(200.0f, 300.0f), glm::vec2(300.0f, 1.0f), glm::vec4(0, 0, 0, 1));

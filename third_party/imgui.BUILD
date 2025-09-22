@@ -20,22 +20,23 @@ cc_library(
 )
 
 cc_library(
-  name = "imgui_glfw_opengl2",
+  name = "imgui_glfw_opengl3",
   srcs = [
     "backends/imgui_impl_glfw.cpp",
-    "backends/imgui_impl_opengl2.cpp",
+    "backends/imgui_impl_opengl3.cpp",
   ],
   hdrs = [
     "backends/imgui_impl_glfw.h",
-    "backends/imgui_impl_opengl2.h",
+    "backends/imgui_impl_opengl3.h",
   ],
   includes = ["backends"],
   deps = [
     ":imgui",
     "@glfw//:glfw",
+    "@glew//:glew",
   ],
   defines = [
-    "IMGUI_IMPL_OPENGL_LOADER_CUSTOM=0",
+    "IMGUI_IMPL_OPENGL_LOADER_GLEW=1",
   ],
   linkopts = select({
     "@platforms//os:windows": [

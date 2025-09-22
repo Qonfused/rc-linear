@@ -24,6 +24,17 @@ git_override(
   commit = "4f28899228fb3ad0126897876f147ca15026151e", # 2024-10-07
 )
 
+# Use http_archive for GLEW pre-built release (contains generated sources)
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+  name = "glew",
+  url = "https://github.com/nigels-com/glew/releases/download/glew-2.2.0/glew-2.2.0.tgz",
+  sha256 = "d4fc82893cfb00109578d0a1a2337fb8ca335b3ceccf97b97e5cc7f08e4353e1",
+  strip_prefix = "glew-2.2.0",
+  build_file = "//third_party:glew.BUILD",
+)
+
 git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 
 # GLM: OpenGL Mathematics
@@ -34,8 +45,8 @@ git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "g
 #
 git_repository(
   name = "glm",
-  commit = "2d4c4b4dd31fde06cfffad7915c2b3006402322f",
   remote = "https://github.com/g-truc/glm.git",
+  commit = "2d4c4b4dd31fde06cfffad7915c2b3006402322f",
   build_file = "//third_party:glm.BUILD",
 )
 
@@ -60,7 +71,7 @@ git_repository(
 git_repository(
   name = "imgui",
   remote = "https://github.com/ocornut/imgui.git",
-  tag = "v1.92.3",
+  commit = "bf75bfec48fc00f532af8926130b70c0e26eb099", # v1.92.3
   build_file = "//third_party:imgui.BUILD",
 )
 
