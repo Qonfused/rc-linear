@@ -1,0 +1,17 @@
+cc_library(
+  name = "implot",
+  srcs = [
+    "implot.cpp",
+    "implot_demo.cpp",
+    "implot_items.cpp",
+  ],
+  hdrs = [
+    "implot.h",
+    "implot_internal.h",
+  ],
+  includes = ["."],
+  deps = [
+    "@imgui//:imgui",
+  ],
+  visibility = ["//visibility:public"],
+)

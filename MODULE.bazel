@@ -5,6 +5,9 @@ module(
   version = "0.1.0",
 )
 
+# Import platforms for OS-specific builds
+bazel_dep(name = "platforms", version = "0.0.11")
+
 # Hedron's Compile Commands Extractor for Bazel
 #
 # A Bazel rule to generate compile_commands.json for use with clangd, ccls, etc.
@@ -36,14 +39,39 @@ git_repository(
   build_file = "//third_party:glm.BUILD",
 )
 
-# LodePNG
+# GLFW: Graphics Library Framework
 #
-# A PNG image decoder and encoder written in C and C++.
-# https://lodev.org/lodepng/
+# A library for creating windows, contexts, and managing input and events
+# in OpenGL, OpenGL ES, and Vulkan applications.
+# https://www.glfw.org/
 #
 git_repository(
-  name = "lodepng",
-  commit = "0b1d9ccfc2093e5d6620cd9a11d03ee6ff6705f5",
-  remote = "https://github.com/lvandeve/lodepng.git",
-  build_file = "//third_party:lodepng.BUILD",
+  name = "glfw",
+  commit = "3fa2360720eeba1964df3c0ecf4b5df8648a8e52", # v3.3.10
+  remote = "https://github.com/glfw/glfw.git",
+  build_file = "//third_party:glfw.BUILD",
+)
+
+# ImGui: Immediate Mode Graphical User Interface
+#
+# A bloat-free graphical user interface library for C++.
+# https://github.com/ocornut/imgui
+#
+git_repository(
+  name = "imgui",
+  remote = "https://github.com/ocornut/imgui.git",
+  tag = "v1.92.3",
+  build_file = "//third_party:imgui.BUILD",
+)
+
+# ImPlot: Immediate Mode Plotting for Dear ImGui
+#
+# A plotting library for Dear ImGui.
+# https://github.com/epezent/implot
+#
+git_repository(
+  name = "implot",
+  remote = "https://github.com/epezent/implot.git",
+  commit = "3da8bd34299965d3b0ab124df743fe3e076fa222", # v0.16.x
+  build_file = "//third_party:implot.BUILD",
 )

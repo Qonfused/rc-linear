@@ -1,7 +1,8 @@
 #pragma once
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
-#include "texture.hpp"
+// #include "texture.hpp"
+#include "texture_simd.hpp"
 
 inline float sdBox(glm::vec2 p, glm::vec2 b) {
   glm::vec2 d = glm::abs(p) - b;
