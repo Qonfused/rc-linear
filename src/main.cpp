@@ -4,6 +4,7 @@
 #include <numeric>
 #include <algorithm>
 #include <iostream>
+#include <chrono>
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
 
@@ -27,287 +28,28 @@
 #include "imgui_impl_opengl3.h"
 #include "implot.h"
 
-#include "texture.hpp"
-#include "scene.hpp"
 #include "rc.hpp"
-
-struct RadialStats {
-  std::vector<float> radii;
-  std::vector<float> mean;
-  std::vector<float> stddev;
-  std::vector<int> count;
-  std::vector<float> ground_truth;
-  std::vector<float> stddev_upper;
-  std::vector<float> stddev_lower;
-};
-
-RadialStats compute_radial_stats(const Texture2D& tex) {
-  std::cout << "Computing radial stats..." << std::endl;
-  
-  int W = tex.width(), H = tex.height();
-  glm::vec2 center(float(W) / 2.0f, float(H) / 2.0f);
-  int max_radius = int(glm::length(center));
-
-  std::vector<std::vector<float>> lum_by_radius(max_radius + 1);
-  std::vector<float> radii;
-  std::vector<float> ground_truth(max_radius + 1, 0.0f);
-
-  for (int y = 0; y < H; ++y) {
-    for (int x = 0; x < W; ++x) {
-      glm::vec2 p(float(x) + 0.5f, float(y) + 0.5f);
-      int r = int(glm::length(p - center));
-      glm::vec4 c = tex.get({x, y});
-      float lum = 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b;
-      if (r >= 0 && r <= max_radius) {
-        lum_by_radius[r].push_back(lum);
-      }
-    }
-  }
-
-  std::vector<float> mean(max_radius + 1, 0.0f);
-  std::vector<float> stddev(max_radius + 1, 0.0f);
-  std::vector<float> stddev_upper, stddev_lower;
-  std::vector<int> count(max_radius + 1, 0);
-
-  for (int r = 0; r <= max_radius; ++r) {
-    radii.push_back(float(r));
-    const auto& vals = lum_by_radius[r];
-    if (!vals.empty()) {
-      float sum = std::accumulate(vals.begin(), vals.end(), 0.0f);
-      mean[r] = sum / vals.size();
-      float sq_sum = 0.0f;
-      for (float v : vals) sq_sum += v * v;
-      float var = sq_sum / vals.size() - mean[r] * mean[r];
-      stddev[r] = (var > 0.0f) ? std::sqrt(var) : 0.0f;
-      count[r] = static_cast<int>(vals.size());
-    }
-    stddev_upper.push_back(mean[r] + stddev[r]);
-    stddev_lower.push_back(std::max(mean[r] - stddev[r], 0.0f));
-  }
-
-  // Ground truth calculation
-  float disk_radius = 15.0f;
-  float peak = 1.0f;
-  for (int r = 0; r <= max_radius; ++r) {
-    if (r <= int(disk_radius)) {
-      ground_truth[r] = peak;
-    } else {
-      ground_truth[r] = peak * disk_radius * disk_radius / (float(r) * float(r) + 1e-3f);
-    }
-  }
-
-  std::cout << "Radial stats computed successfully" << std::endl;
-  return RadialStats{radii, mean, stddev, count, ground_truth, stddev_upper, stddev_lower};
-}
-
-static std::vector<unsigned char> texture_to_rgba(const Texture2D& tex) {
-  std::cout << "Converting texture to RGBA..." << std::endl;
-  std::vector<unsigned char> buf(tex.width() * tex.height() * 4);
-  for (int y = 0; y < tex.height(); ++y) {
-    for (int x = 0; x < tex.width(); ++x) {
-      glm::vec4 c = tex.get({x, y});
-      c = glm::clamp(c, glm::vec4(0.0f), glm::vec4(1.0f));
-      size_t idx = (y * tex.width() + x) * 4;
-      buf[idx + 0] = (unsigned char)std::lround(c.r * 255.0f);
-      buf[idx + 1] = (unsigned char)std::lround(c.g * 255.0f);
-      buf[idx + 2] = (unsigned char)std::lround(c.b * 255.0f);
-      buf[idx + 3] = (unsigned char)std::lround(c.a * 255.0f);
-    }
-  }
-  std::cout << "Texture converted successfully" << std::endl;
-  return buf;
-}
-
-class ImPlotChartRenderer {
-private:
-  static inline double shared_x_min = 0.0;
-  static inline double shared_x_max = 100.0;
-
-public:
-  ImPlotChartRenderer() {
-    std::cout << "ImPlot Chart Renderer initialized" << std::endl;
-  }
-
-  void render(const RadialStats& stats) {
-    std::vector<float> stddev_percent(stats.stddev.size(), 0.0f);
-    for (size_t i = 0; i < stats.stddev.size(); ++i) {
-      if (stats.mean[i] != 0.0f) {
-        stddev_percent[i] = (stats.stddev[i] / stats.mean[i]) * 100.0f;
-      } else {
-        stddev_percent[i] = 0.0f;
-      }
-    }
-
-    // Get display size for positioning
-    ImGuiIO& io = ImGui::GetIO();
-    ImVec2 display_size = io.DisplaySize;
-    
-    // Define panel dimensions
-    const float panel_width = 520.0f;
-    const float panel_height = display_size.y - 20.0f; // Full height minus padding
-    const float padding = 10.0f;
-    
-    // Position at top-right corner
-    ImVec2 window_pos(display_size.x - panel_width - padding, padding);
-    ImVec2 window_size(panel_width, panel_height);
-
-    // Set window position and size (always)
-    ImGui::SetNextWindowPos(window_pos, ImGuiCond_Always);
-    ImGui::SetNextWindowSize(window_size, ImGuiCond_Always);
-
-    // Create window with specific flags to prevent user manipulation
-    ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoMove | 
-                     ImGuiWindowFlags_NoResize | 
-                     ImGuiWindowFlags_NoCollapse |
-                     ImGuiWindowFlags_NoTitleBar;
-
-    if (ImGui::Begin("##RadianceCascadeAnalysis", nullptr, window_flags)) {
-      ImGui::Text("Luminance Falloff Analysis");
-      ImGui::Separator();
-      
-      float available_height = ImGui::GetContentRegionAvail().y - 120.0f;
-
-      if (!stats.radii.empty()) {
-        shared_x_max = stats.radii.back();
-      }
-
-      static float row_ratios[] = {0.7f, 0.3f};
-
-      if (ImPlot::BeginSubplots("##AlignedPlots", 2, 1, ImVec2(-1, available_height),
-                  ImPlotSubplotFlags_LinkCols, row_ratios, nullptr)) {
-
-        if (ImPlot::BeginPlot("##MainPlot")) {
-          ImPlot::SetupAxes("", "Luminance",
-                  ImPlotAxisFlags_NoLabel | ImPlotAxisFlags_NoTickLabels | ImPlotAxisFlags_NoGridLines,
-                  ImPlotAxisFlags_AutoFit);
-
-          ImPlot::SetupLegend(ImPlotLocation_NorthEast);
-
-          ImPlot::SetupAxisLimits(ImAxis_X1, shared_x_min, shared_x_max);
-          ImPlot::SetupAxisLimits(ImAxis_Y1, 0, 1.1);
-
-          if (!stats.radii.empty() && !stats.stddev_upper.empty() && !stats.stddev_lower.empty()) {
-            ImPlot::PushStyleColor(ImPlotCol_Fill, ImVec4(0.2f, 0.6f, 1.0f, 0.5f));
-            ImPlot::PlotShaded("+/-1s Confidence",
-                     stats.radii.data(),
-                     stats.stddev_lower.data(),
-                     stats.stddev_upper.data(),
-                     static_cast<int>(stats.radii.size()));
-            ImPlot::PopStyleColor();
-          }
-
-          if (!stats.radii.empty() && !stats.mean.empty()) {
-            ImPlot::PushStyleColor(ImPlotCol_Line, ImVec4(0.2f, 0.6f, 1.0f, 1.0f));
-            ImPlot::SetNextLineStyle(ImVec4(0.2f, 0.6f, 1.0f, 1.0f), 2.0f);
-            ImPlot::PlotLine("Mean (mu)",
-                     stats.radii.data(),
-                     stats.mean.data(),
-                     static_cast<int>(stats.radii.size()));
-            ImPlot::PopStyleColor();
-          }
-
-          if (!stats.radii.empty() && !stats.ground_truth.empty()) {
-            ImPlot::PushStyleColor(ImPlotCol_Line, ImVec4(1.0f, 0.2f, 0.2f, 1.0f));
-            ImPlot::SetNextLineStyle(ImVec4(1.0f, 0.2f, 0.2f, 1.0f), 2.0f);
-            ImPlot::PlotLine("Ground Truth",
-                     stats.radii.data(),
-                     stats.ground_truth.data(),
-                     static_cast<int>(stats.radii.size()));
-            ImPlot::PopStyleColor();
-          }
-
-          ImPlotRect limits = ImPlot::GetPlotLimits();
-          shared_x_min = limits.X.Min;
-          shared_x_max = limits.X.Max;
-
-          ImPlot::EndPlot();
-        }
-
-        if (ImPlot::BeginPlot("##StddevPlot")) {
-          ImPlot::SetupAxes("Radius (pixels)", "RSD (%)",
-                  ImPlotAxisFlags_AutoFit,
-                  ImPlotAxisFlags_AutoFit);
-
-          ImPlot::SetupLegend(ImPlotLocation_NorthEast);
-
-          ImPlot::SetupAxisLimits(ImAxis_X1, shared_x_min, shared_x_max);
-
-          if (!stddev_percent.empty()) {
-            float max_stddev_pct = *std::max_element(stddev_percent.begin(), stddev_percent.end());
-            ImPlot::SetupAxisLimits(ImAxis_Y1, 0, max_stddev_pct * 1.1f);
-
-            ImPlot::PushStyleColor(ImPlotCol_Line, ImVec4(1.0f, 0.7f, 0.2f, 1.0f));
-            ImPlot::SetNextLineStyle(ImVec4(1.0f, 0.7f, 0.2f, 1.0f), 2.0f);
-            ImPlot::PlotLine("s/mu Ratio",
-                     stats.radii.data(), stddev_percent.data(),
-                     static_cast<int>(stats.radii.size()));
-            ImPlot::PopStyleColor();
-          }
-
-          ImPlotRect limits = ImPlot::GetPlotLimits();
-          shared_x_min = limits.X.Min;
-          shared_x_max = limits.X.Max;
-
-          ImPlot::EndPlot();
-        }
-
-        ImPlot::EndSubplots();
-      }
-
-      if (ImGui::CollapsingHeader("Statistics", ImGuiTreeNodeFlags_DefaultOpen)) {
-        if (!stats.mean.empty()) {
-          float max_val = *std::max_element(stats.mean.begin(), stats.mean.end());
-          float avg_val = std::accumulate(stats.mean.begin(), stats.mean.end(), 0.0f) / stats.mean.size();
-          float avg_stddev = std::accumulate(stats.stddev.begin(), stats.stddev.end(), 0.0f) / stats.stddev.size();
-
-          ImGui::Text("Peak Luminance (mu_max): %.4f", max_val);
-          ImGui::Text("Average Luminance (mu_avg): %.4f", avg_val);
-          ImGui::Text("Average Std Dev (s_avg): %.4f", avg_stddev);
-          ImGui::Text("Data Points: %zu", stats.radii.size());
-
-          if (!stats.ground_truth.empty() && stats.mean.size() == stats.ground_truth.size()) {
-            float mse = 0.0f;
-            for (size_t i = 0; i < stats.mean.size(); ++i) {
-              float diff = stats.mean[i] - stats.ground_truth[i];
-              mse += diff * diff;
-            }
-            mse /= stats.mean.size();
-            ImGui::Text("MSE vs Ground Truth: %.6f", mse);
-          }
-        }
-      }
-    }
-    ImGui::End();
-  }
-};
+#include "stats.hpp"
+#include "plotting.hpp"
+#include "perf.hpp"
 
 int main() {
   std::cout << "Starting RC Linear application with GPU acceleration..." << std::endl;
 
   try {
-    constexpr int NUM_CASCADES = 8;
-    const int baseProbeSize = 1;
-    const float baseIntervalLength = 0.2f;
-
-    // Dynamic sizing - will be updated based on window
-    int RC_WIDTH = 512;
-    int RC_HEIGHT = 512;
-    
-    // Initialize GLFW first
+    // Initialize GLFW
     if (!glfwInit()) {
       std::cerr << "Failed to initialize GLFW\n";
       return 1;
     }
-
     std::cout << "GLFW initialized successfully" << std::endl;
 
-    // Request OpenGL 4.3 for compute shaders with compatibility profile
+    // Request OpenGL 4.3 (compute)
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_COMPAT_PROFILE);
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);  // Allow resizing
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
-    // Create window with temporary title
     std::string window_title = "RC Linear (OpenGL)";
     GLFWwindow* window = glfwCreateWindow(1280, 768, window_title.c_str(), nullptr, nullptr);
     if (!window) {
@@ -315,17 +57,14 @@ int main() {
       glfwTerminate();
       return 1;
     }
-
     std::cout << "GLFW window created successfully" << std::endl;
 
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 
-    // Using the OpenGL context, check actual version
     const char* gl_version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
     std::cout << "Requesting OpenGL 4.3 context, got version: " << gl_version << std::endl;
 
-    // Update window title with actual OpenGL version
     window_title = "RC Linear (OpenGLv";
     window_title += gl_version;
     window_title += ")";
@@ -336,58 +75,13 @@ int main() {
       std::cerr << "Failed to initialize GLEW" << std::endl;
       return 1;
     }
-
     std::cout << "GLEW initialized successfully" << std::endl;
 
     // Initialize GPU renderer
     std::cout << "Initializing GPU renderer..." << std::endl;
     g_gpu_renderer.initialize();
 
-    // Function to regenerate RC scene when window size changes
-    auto regenerate_rc_data = [&](int width, int height) {
-      RC_WIDTH = width;
-      RC_HEIGHT = height;
-      glm::vec2 resolution(RC_WIDTH, RC_HEIGHT);
-
-      std::cout << "Regenerating RC scene for " << width << "x" << height << std::endl;
-
-      // Create scene with new dimensions
-      Texture2D scene(RC_WIDTH, RC_HEIGHT);
-      render_scene(scene, resolution);
-
-      // Initialize cascades
-      Texture2D cascadeA(RC_WIDTH, RC_HEIGHT), cascadeB(RC_WIDTH, RC_HEIGHT);
-      cascadeA.clear(glm::vec4(0.0f));
-      cascadeB.clear(glm::vec4(0.0f));
-
-      Texture2D output(RC_WIDTH, RC_HEIGHT);
-      output.clear(glm::vec4(0.0f));
-
-      // Run RC passes
-      Texture2D* readTex = &cascadeA;
-      Texture2D* writeTex = &cascadeB;
-      for (int i = NUM_CASCADES - 1; i >= 0; --i) {
-        Texture2D& dst = (i == 0) ? output : *writeTex;
-        run_rc_pass(
-          baseProbeSize,
-          baseIntervalLength,
-          i,
-          resolution,
-          scene,
-          *readTex,
-          dst
-        );
-        if (i != 0) std::swap(readTex, writeTex);
-      }
-
-      return std::make_tuple(std::move(output), std::move(scene));
-    };
-
-    // Initial generation
-    auto [output, scene] = regenerate_rc_data(512, 512);
-
-    std::cout << "Initial RC generation complete, initializing ImGui/ImPlot..." << std::endl;
-
+    // ImGui/ImPlot init
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImPlot::CreateContext();
@@ -395,38 +89,77 @@ int main() {
     ImGuiIO& io = ImGui::GetIO(); (void)io;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
-
     ImGui::StyleColorsDark();
-
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 430");
 
     std::cout << "ImGui/ImPlot initialized successfully" << std::endl;
 
-    // Create OpenGL texture
-    GLuint texID = 0;
-    glGenTextures(1, &texID);
+    // Parameters
+    constexpr int NUM_CASCADES = 8;
+    const int baseProbeSize = 1;
+    const float baseIntervalLength = 0.2f;
 
-    auto upload_texture = [&](const Texture2D& tex) {
-      std::vector<unsigned char> rgba = texture_to_rgba(tex);
-      glBindTexture(GL_TEXTURE_2D, texID);
+    // Dynamic sizing
+    int RC_WIDTH = 512, RC_HEIGHT = 512;
+
+    // Display texture (stable image shown on screen)
+    GLuint displayTex = 0;
+    auto ensure_display_tex = [](GLuint& tex, int w, int h) {
+      if (tex != 0) {
+        GLint curW = 0, curH = 0;
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &curW);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &curH);
+        if (curW == w && curH == h) return;
+        glDeleteTextures(1, &tex);
+        tex = 0;
+      }
+      glGenTextures(1, &tex);
+      glBindTexture(GL_TEXTURE_2D, tex);
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.width(), tex.height(), 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     };
 
-    upload_texture(output);
+    // Stats, debounced
+    RadialStats stats;
+    double last_stats_time = -1.0;
+    const double STATS_INTERVAL = 0.25; // seconds between stat updates
+    bool stats_dirty = true;            // request stats after RC completes
 
-    RadialStats stats = compute_radial_stats(output);
+    // Perf instrumentation (from perf.hpp)
+    Perf perf;
+    perf.init();
+    static uint64_t frame_counter = 0;
+
+    // Fence for RC completion
+    GLsync rcFence = 0;
+    auto kick_rc = [&](int w, int h) {
+      // Measure CPU + GPU cost of the RC cascade submission/execution
+      perf.beginCpuRC();
+      perf.beginGpuRC();
+      run_full_rc(baseProbeSize, baseIntervalLength, NUM_CASCADES, glm::vec2(w, h), Texture2D());
+      perf.endGpuRC();
+      perf.endCpuRC();
+
+      if (rcFence) { glDeleteSync(rcFence); rcFence = 0; }
+      rcFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+      stats_dirty = true; // stats should be recomputed when RC is done
+    };
+
+    // Initial RC run
+    ensure_display_tex(displayTex, RC_WIDTH, RC_HEIGHT);
+    kick_rc(RC_WIDTH, RC_HEIGHT);
+
     ImPlotChartRenderer chartRenderer;
 
     std::cout << "Entering main loop..." << std::endl;
 
     // Track window size for dynamic updates
     int last_window_width = 0, last_window_height = 0;
-    bool needs_regeneration = false;
-    float regeneration_timer = 0.0f;
-    const float REGENERATION_DELAY = 0.5f; // Wait 0.5s after resize before regenerating
 
     // Define ImGui panel width and dimensions
     const int IMGUI_PANEL_WIDTH = 520;
@@ -437,73 +170,172 @@ int main() {
     while (!glfwWindowShouldClose(window)) {
       glfwPollEvents();
 
-      // Check for window size changes
+      perf.beginFrame(io.DeltaTime);
+      frame_counter++;
+
+      // Check for window size changes and kick RC immediately (no debounce)
       int window_width, window_height;
       glfwGetWindowSize(window, &window_width, &window_height);
-      
       if (window_width != last_window_width || window_height != last_window_height) {
         last_window_width = window_width;
         last_window_height = window_height;
-        needs_regeneration = true;
-        regeneration_timer = REGENERATION_DELAY;
-        std::cout << "Window resized to " << window_width << "x" << window_height << std::endl;
+
+        int rc_width  = std::max(MIN_RC_WIDTH,  window_width  - IMGUI_PANEL_WIDTH - (PADDING * 3));
+        int rc_height = std::max(MIN_RC_HEIGHT, window_height - (PADDING * 2));
+        RC_WIDTH = rc_width;
+        RC_HEIGHT = rc_height;
+
+        ensure_display_tex(displayTex, RC_WIDTH, RC_HEIGHT);
+        kick_rc(RC_WIDTH, RC_HEIGHT);
       }
 
-      // Handle delayed regeneration
-      if (needs_regeneration) {
-        regeneration_timer -= io.DeltaTime;
-        if (regeneration_timer <= 0.0f) {
-          // Calculate RC resolution based on available area (full window minus ImGui panel)
-          int rc_width = std::max(MIN_RC_WIDTH, window_width - IMGUI_PANEL_WIDTH - (PADDING * 3));
-          int rc_height = std::max(MIN_RC_HEIGHT, window_height - (PADDING * 2));
-          
-          std::tie(output, scene) = regenerate_rc_data(rc_width, rc_height);
-          upload_texture(output);
-          stats = compute_radial_stats(output);
-          needs_regeneration = false;
+      // If RC is in flight, poll fence without blocking; when ready, copy to display and compute stats (debounced)
+      if (rcFence) {
+        GLenum res = glClientWaitSync(rcFence, 0, 0);
+        if (res == GL_ALREADY_SIGNALED || res == GL_CONDITION_SATISFIED) {
+          glDeleteSync(rcFence);
+          rcFence = 0;
+
+          // Copy RC output into stable displayTex (measure CPU + GPU)
+          perf.beginCpuCopy();
+          perf.beginGpuCopy();
+          GLuint outTex = g_gpu_renderer.resultTex();
+          glCopyImageSubData(outTex, GL_TEXTURE_2D, 0, 0, 0, 0,
+                             displayTex, GL_TEXTURE_2D, 0, 0, 0, 0,
+                             RC_WIDTH, RC_HEIGHT, 1);
+          perf.endGpuCopy();
+          perf.endCpuCopy();
+
+          // Debounced stats computation (measure CPU + GPU)
+          double now = ImGui::GetTime();
+          if (last_stats_time < 0.0 || (now - last_stats_time) >= STATS_INTERVAL) {
+            perf.beginCpuStats();
+            perf.beginGpuStats();
+            stats = compute_radial_stats_gpu(displayTex, RC_WIDTH, RC_HEIGHT);
+            perf.endGpuStats();
+            perf.endCpuStats();
+
+            last_stats_time = now;
+            stats_dirty = false;
+          }
+        }
+      } else if (stats_dirty) {
+        // If fence already passed earlier but stats were deferred by interval, compute now if interval elapsed
+        double now = ImGui::GetTime();
+        if (last_stats_time < 0.0 || (now - last_stats_time) >= STATS_INTERVAL) {
+          perf.beginCpuStats();
+          perf.beginGpuStats();
+          stats = compute_radial_stats_gpu(displayTex, RC_WIDTH, RC_HEIGHT);
+          perf.endGpuStats();
+          perf.endCpuStats();
+
+          last_stats_time = now;
+          stats_dirty = false;
         }
       }
+
+      // Resolve GPU queries from previous frame(s) without blocking
+      perf.resolveAll();
 
       ImGui_ImplOpenGL3_NewFrame();
       ImGui_ImplGlfw_NewFrame();
       ImGui::NewFrame();
 
-      glClearColor(0.1f, 0.1f, 0.1f, 1.0f);  // Dark gray background
+      glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
       glClear(GL_COLOR_BUFFER_BIT);
 
       int display_w, display_h;
       glfwGetFramebufferSize(window, &display_w, &display_h);
 
-      // Calculate RC display area (spans available area, accounting for anchored panel)
-      int rc_display_width = display_w - IMGUI_PANEL_WIDTH - (PADDING * 3); // Account for panel and padding
-      int rc_display_height = display_h - (PADDING * 2); // Top and bottom padding
-      
+      // Calculate RC display area (screen-space, bottom-left origin)
+      int rc_display_width  = display_w - IMGUI_PANEL_WIDTH - (PADDING * 3);
+      int rc_display_height = display_h - (PADDING * 2);
       int rc_x_offset = PADDING;
       int rc_y_offset = PADDING;
 
-      // Ensure minimum size
-      rc_display_width = std::max(rc_display_width, MIN_RC_WIDTH);
+      rc_display_width  = std::max(rc_display_width,  MIN_RC_WIDTH);
       rc_display_height = std::max(rc_display_height, MIN_RC_HEIGHT);
 
-      // Set viewport for RC display (full rectangle)
+      // Set viewport for RC display (normalized coordinates [0,1]^2)
       glViewport(rc_x_offset, rc_y_offset, rc_display_width, rc_display_height);
       glMatrixMode(GL_PROJECTION);
       glLoadIdentity();
-      glOrtho(0, 1, 0, 1, -1, 1); // Normalized coordinates
+      glOrtho(0, 1, 0, 1, -1, 1);
       glMatrixMode(GL_MODELVIEW);
       glLoadIdentity();
 
-      // Draw RC output texture (normalized coordinates)
-      glEnable(GL_TEXTURE_2D);
-      glBindTexture(GL_TEXTURE_2D, texID);
-      glColor3f(1.0f, 1.0f, 1.0f);
-      glBegin(GL_QUADS);
-        glTexCoord2f(0.0f, 0.0f); glVertex2f(0.0f, 0.0f);
-        glTexCoord2f(1.0f, 0.0f); glVertex2f(1.0f, 0.0f);
-        glTexCoord2f(1.0f, 1.0f); glVertex2f(1.0f, 1.0f);
-        glTexCoord2f(0.0f, 1.0f); glVertex2f(0.0f, 1.0f);
-      glEnd();
-      glDisable(GL_TEXTURE_2D);
+      // Shared hover sync state (reset each frame)
+      HoverSync sync{};
+
+      // Draw the stable display texture
+      if (displayTex != 0) {
+        glEnable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, displayTex);
+        glColor3f(1.0f, 1.0f, 1.0f);
+        glBegin(GL_QUADS);
+          glTexCoord2f(0.0f, 0.0f); glVertex2f(0.0f, 0.0f);
+          glTexCoord2f(1.0f, 0.0f); glVertex2f(1.0f, 0.0f);
+          glTexCoord2f(1.0f, 1.0f); glVertex2f(1.0f, 1.0f);
+          glTexCoord2f(0.0f, 1.0f); glVertex2f(0.0f, 1.0f);
+        glEnd();
+        glDisable(GL_TEXTURE_2D);
+      }
+
+      // RC hover detection and overlay circle
+      {
+        double mx_win, my_win;
+        glfwGetCursorPos(window, &mx_win, &my_win);
+        float mouse_x = (float)mx_win;
+        float mouse_y_bl = (float)display_h - (float)my_win; // bottom-left origin
+
+        bool hover_rc = mouse_x >= (float)rc_x_offset &&
+                        mouse_x <= (float)(rc_x_offset + rc_display_width) &&
+                        mouse_y_bl >= (float)rc_y_offset &&
+                        mouse_y_bl <= (float)(rc_y_offset + rc_display_height);
+
+        if (hover_rc && RC_WIDTH > 0 && RC_HEIGHT > 0) {
+          float u = (mouse_x - (float)rc_x_offset) / (float)rc_display_width;
+          float v = (mouse_y_bl - (float)rc_y_offset) / (float)rc_display_height;
+
+          float px = u * RC_WIDTH;
+          float py = v * RC_HEIGHT;
+
+          float cx = 0.5f * RC_WIDTH;
+          float cy = 0.5f * RC_HEIGHT;
+
+          float rp = std::sqrt((px - cx)*(px - cx) + (py - cy)*(py - cy));
+          float max_r = std::sqrt(cx*cx + cy*cy);
+
+          sync.active = true;
+          sync.radius = std::clamp(rp, 0.0f, max_r);
+
+          // Tooltip near the mouse with the pixel radius
+          ImVec2 mouse_win = ImGui::GetIO().MousePos; // top-left origin
+          ImGui::SetNextWindowPos(ImVec2(mouse_win.x + 14.0f, mouse_win.y + 18.0f), ImGuiCond_Always);
+          ImGui::BeginTooltip();
+          ImGui::Text("r = %.1f px", sync.radius);
+          ImGui::EndTooltip();
+        }
+
+        // Draw overlay circle if active (ellipse in normalized space to reflect pixel radius)
+        if (sync.active && RC_WIDTH > 0 && RC_HEIGHT > 0) {
+          const int segments = 256;
+          const float cx_n = 0.5f, cy_n = 0.5f;
+          const float rx_n = sync.radius / (float)RC_WIDTH;
+          const float ry_n = sync.radius / (float)RC_HEIGHT;
+
+          glColor4f(1.0f, 0.8f, 0.2f, 1.0f);
+          glLineWidth(1.5f);
+          glBegin(GL_LINE_LOOP);
+          for (int i = 0; i < segments; ++i) {
+            float t = (float)i * (2.0f * glm::pi<float>() / (float)segments);
+            float x = cx_n + rx_n * std::cos(t);
+            float y = cy_n + ry_n * std::sin(t);
+            glVertex2f(x, y);
+          }
+          glEnd();
+        }
+      }
 
       // Reset viewport for UI elements
       glViewport(0, 0, display_w, display_h);
@@ -518,32 +350,41 @@ int main() {
       glColor4f(63.0f/255.0f, 63.0f/255.0f, 72.0f/255.0f, 1.0f); // #3f3f48
       glLineWidth(1.0f);
       glBegin(GL_LINE_LOOP);
-        glVertex2f(rc_x_offset, rc_y_offset);
-        glVertex2f(rc_x_offset + rc_display_width, rc_y_offset);
-        glVertex2f(rc_x_offset + rc_display_width, rc_y_offset + rc_display_height);
-        glVertex2f(rc_x_offset, rc_y_offset + rc_display_height);
+        glVertex2f((float)PADDING, (float)PADDING);
+        glVertex2f((float)(PADDING + rc_display_width), (float)PADDING);
+        glVertex2f((float)(PADDING + rc_display_width), (float)(PADDING + rc_display_height));
+        glVertex2f((float)PADDING, (float)(PADDING + rc_display_height));
       glEnd();
 
-      // Show status indicator when regenerating
-      if (needs_regeneration) {
+      // Show status indicator when RC is in flight
+      if (rcFence) {
         glColor3f(1.0f, 1.0f, 0.0f);
         glPointSize(10.0f);
         glBegin(GL_POINTS);
-          glVertex2f(rc_x_offset + 20, rc_y_offset + rc_display_height - 20);
+          glVertex2f((float)PADDING + 20.0f, (float)(PADDING + rc_display_height - 20.0f));
         glEnd();
       }
 
-      chartRenderer.render(stats);
+      // Perf overlay (frame counter + timing) in RC viewport top-left (screen-space)
+      perf.drawOverlay(display_h,
+                       PADDING, PADDING, rc_display_width, rc_display_height,
+                       frame_counter, true);
+
+      // Render charts from last computed stats, synchronized with RC hover/markers
+      chartRenderer.render(stats, sync);
 
       ImGui::Render();
       ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
+      perf.endFrame();
       glfwSwapBuffers(window);
     }
 
     std::cout << "Cleaning up..." << std::endl;
 
-    glDeleteTextures(1, &texID);
+    if (rcFence) glDeleteSync(rcFence);
+    if (displayTex) glDeleteTextures(1, &displayTex);
+    perf.shutdown();
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
