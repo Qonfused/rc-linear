@@ -454,12 +454,8 @@ int main() {
         regeneration_timer -= io.DeltaTime;
         if (regeneration_timer <= 0.0f) {
           // Calculate RC resolution based on available area (full window minus ImGui panel)
-          int available_width = std::max(MIN_RC_WIDTH, window_width - IMGUI_PANEL_WIDTH - (PADDING * 3));
-          int available_height = std::max(MIN_RC_HEIGHT, window_height - (PADDING * 2));
-          
-          // Scale down for performance if too large
-          int rc_width = std::min(available_width, 1024);  // Max 1024 width
-          int rc_height = std::min(available_height, 768); // Max 768 height
+          int rc_width = std::max(MIN_RC_WIDTH, window_width - IMGUI_PANEL_WIDTH - (PADDING * 3));
+          int rc_height = std::max(MIN_RC_HEIGHT, window_height - (PADDING * 2));
           
           std::tie(output, scene) = regenerate_rc_data(rc_width, rc_height);
           upload_texture(output);
