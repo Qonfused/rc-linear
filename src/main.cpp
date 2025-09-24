@@ -34,15 +34,12 @@
 #include "perf.hpp"
 
 int main() {
-  std::cout << "Starting RC Linear application with GPU acceleration..." << std::endl;
-
   try {
     // Initialize GLFW
     if (!glfwInit()) {
       std::cerr << "Failed to initialize GLFW\n";
       return 1;
     }
-    std::cout << "GLFW initialized successfully" << std::endl;
 
     // Request OpenGL 4.3 (compute)
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -57,13 +54,11 @@ int main() {
       glfwTerminate();
       return 1;
     }
-    std::cout << "GLFW window created successfully" << std::endl;
 
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 
     const char* gl_version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
-    std::cout << "Requesting OpenGL 4.3 context, got version: " << gl_version << std::endl;
 
     window_title = "RC Linear (OpenGLv";
     window_title += gl_version;
@@ -75,10 +70,9 @@ int main() {
       std::cerr << "Failed to initialize GLEW" << std::endl;
       return 1;
     }
-    std::cout << "GLEW initialized successfully" << std::endl;
 
     // Initialize GPU renderer
-    std::cout << "Initializing GPU renderer..." << std::endl;
+    RCGPURenderer g_gpu_renderer;
     g_gpu_renderer.initialize();
 
     // ImGui/ImPlot init
@@ -93,7 +87,6 @@ int main() {
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 430");
 
-    std::cout << "ImGui/ImPlot initialized successfully" << std::endl;
 
     // Parameters
     constexpr int NUM_CASCADES = 8;
@@ -103,34 +96,13 @@ int main() {
     // Dynamic sizing
     int RC_WIDTH = 512, RC_HEIGHT = 512;
 
-    // Display texture (stable image shown on screen)
-    GLuint displayTex = 0;
-    auto ensure_display_tex = [](GLuint& tex, int w, int h) {
-      if (tex != 0) {
-        GLint curW = 0, curH = 0;
-        glBindTexture(GL_TEXTURE_2D, tex);
-        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &curW);
-        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &curH);
-        if (curW == w && curH == h) return;
-        glDeleteTextures(1, &tex);
-        tex = 0;
-      }
-      glGenTextures(1, &tex);
-      glBindTexture(GL_TEXTURE_2D, tex);
-      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    };
-
     // Stats, debounced
     RadialStats stats;
     double last_stats_time = -1.0;
     const double STATS_INTERVAL = 0.25; // seconds between stat updates
     bool stats_dirty = true;            // request stats after RC completes
 
-    // Perf instrumentation (from perf.hpp)
+    // Perf instrumentation
     Perf perf;
     perf.init();
     static uint64_t frame_counter = 0;
@@ -138,25 +110,19 @@ int main() {
     // Fence for RC completion
     GLsync rcFence = 0;
     auto kick_rc = [&](int w, int h) {
-      // Measure CPU + GPU cost of the RC cascade submission/execution
-      perf.beginCpuRC();
-      perf.beginGpuRC();
-      run_full_rc(baseProbeSize, baseIntervalLength, NUM_CASCADES, glm::vec2(w, h), Texture2D());
-      perf.endGpuRC();
-      perf.endCpuRC();
+      g_gpu_renderer.run_full_rc(baseProbeSize, baseIntervalLength, NUM_CASCADES,
+                                 glm::ivec2(w, h), &perf);
 
       if (rcFence) { glDeleteSync(rcFence); rcFence = 0; }
       rcFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-      stats_dirty = true; // stats should be recomputed when RC is done
+      stats_dirty = true;
     };
 
     // Initial RC run
-    ensure_display_tex(displayTex, RC_WIDTH, RC_HEIGHT);
     kick_rc(RC_WIDTH, RC_HEIGHT);
 
     ImPlotChartRenderer chartRenderer;
 
-    std::cout << "Entering main loop..." << std::endl;
 
     // Track window size for dynamic updates
     int last_window_width = 0, last_window_height = 0;
@@ -185,33 +151,23 @@ int main() {
         RC_WIDTH = rc_width;
         RC_HEIGHT = rc_height;
 
-        ensure_display_tex(displayTex, RC_WIDTH, RC_HEIGHT);
         kick_rc(RC_WIDTH, RC_HEIGHT);
       }
 
-      // If RC is in flight, poll fence without blocking; when ready, copy to display and compute stats (debounced)
+      // If RC is in flight, poll fence; when ready, compute stats (debounced)
       if (rcFence) {
         GLenum res = glClientWaitSync(rcFence, 0, 0);
         if (res == GL_ALREADY_SIGNALED || res == GL_CONDITION_SATISFIED) {
           glDeleteSync(rcFence);
           rcFence = 0;
 
-          // Copy RC output into stable displayTex (measure CPU + GPU)
-          perf.beginCpuCopy();
-          perf.beginGpuCopy();
-          GLuint outTex = g_gpu_renderer.resultTex();
-          glCopyImageSubData(outTex, GL_TEXTURE_2D, 0, 0, 0, 0,
-                             displayTex, GL_TEXTURE_2D, 0, 0, 0, 0,
-                             RC_WIDTH, RC_HEIGHT, 1);
-          perf.endGpuCopy();
-          perf.endCpuCopy();
-
-          // Debounced stats computation (measure CPU + GPU)
+          // Debounced stats computation (from high-precision resultTex)
           double now = ImGui::GetTime();
           if (last_stats_time < 0.0 || (now - last_stats_time) >= STATS_INTERVAL) {
             perf.beginCpuStats();
             perf.beginGpuStats();
-            stats = compute_radial_stats_gpu(displayTex, RC_WIDTH, RC_HEIGHT);
+            GLuint outTex = g_gpu_renderer.resultTex(); // RGBA32F
+            stats = compute_radial_stats_gpu(outTex, RC_WIDTH, RC_HEIGHT);
             perf.endGpuStats();
             perf.endCpuStats();
 
@@ -225,7 +181,8 @@ int main() {
         if (last_stats_time < 0.0 || (now - last_stats_time) >= STATS_INTERVAL) {
           perf.beginCpuStats();
           perf.beginGpuStats();
-          stats = compute_radial_stats_gpu(displayTex, RC_WIDTH, RC_HEIGHT);
+          GLuint outTex = g_gpu_renderer.resultTex();
+          stats = compute_radial_stats_gpu(outTex, RC_WIDTH, RC_HEIGHT);
           perf.endGpuStats();
           perf.endCpuStats();
 
@@ -267,18 +224,21 @@ int main() {
       // Shared hover sync state (reset each frame)
       HoverSync sync{};
 
-      // Draw the stable display texture
-      if (displayTex != 0) {
-        glEnable(GL_TEXTURE_2D);
-        glBindTexture(GL_TEXTURE_2D, displayTex);
-        glColor3f(1.0f, 1.0f, 1.0f);
-        glBegin(GL_QUADS);
-          glTexCoord2f(0.0f, 0.0f); glVertex2f(0.0f, 0.0f);
-          glTexCoord2f(1.0f, 0.0f); glVertex2f(1.0f, 0.0f);
-          glTexCoord2f(1.0f, 1.0f); glVertex2f(1.0f, 1.0f);
-          glTexCoord2f(0.0f, 1.0f); glVertex2f(0.0f, 1.0f);
-        glEnd();
-        glDisable(GL_TEXTURE_2D);
+      // Draw the renderer's RGBA8 display texture
+      {
+        GLuint disp = g_gpu_renderer.displayTex();
+        if (disp != 0) {
+          glEnable(GL_TEXTURE_2D);
+          glBindTexture(GL_TEXTURE_2D, disp);
+          glColor3f(1.0f, 1.0f, 1.0f);
+          glBegin(GL_QUADS);
+            glTexCoord2f(0.0f, 0.0f); glVertex2f(0.0f, 0.0f);
+            glTexCoord2f(1.0f, 0.0f); glVertex2f(1.0f, 0.0f);
+            glTexCoord2f(1.0f, 1.0f); glVertex2f(1.0f, 1.0f);
+            glTexCoord2f(0.0f, 1.0f); glVertex2f(0.0f, 1.0f);
+          glEnd();
+          glDisable(GL_TEXTURE_2D);
+        }
       }
 
       // RC hover detection and overlay circle
@@ -380,10 +340,8 @@ int main() {
       glfwSwapBuffers(window);
     }
 
-    std::cout << "Cleaning up..." << std::endl;
 
     if (rcFence) glDeleteSync(rcFence);
-    if (displayTex) glDeleteTextures(1, &displayTex);
     perf.shutdown();
 
     ImGui_ImplOpenGL3_Shutdown();
@@ -394,7 +352,6 @@ int main() {
     glfwDestroyWindow(window);
     glfwTerminate();
 
-    std::cout << "Application finished successfully" << std::endl;
 
   } catch (const std::exception& e) {
     std::cerr << "Exception caught: " << e.what() << std::endl;
