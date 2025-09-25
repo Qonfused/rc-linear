@@ -76,7 +76,7 @@ public:
       run_cascade_pass(baseProbeSize, baseIntervalLength, i, resolution);
     }
 
-    // Ensure final writes visible to blit/stats
+    // Single barrier after all cascades complete
     glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
 
     // Postprocess blit from final RGBA32F (linear) into RGBA8 (sRGB) for display
@@ -194,9 +194,6 @@ private:
     GLuint gx = (GLuint)((res.x + 15) / 16);
     GLuint gy = (GLuint)((res.y + 15) / 16);
     glDispatchCompute(gx, gy, 1);
-
-    // Ensure writes visible and next pass sees up-to-date data when sampling previous output
-    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
 
     // Ping-pong swap: next pass will sample 'cascade_input_' (previous output)
     std::swap(cascade_input_, cascade_output_);

@@ -87,7 +87,6 @@ int main() {
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 430");
 
-
     // Parameters
     constexpr int NUM_CASCADES = 8;
     const int baseProbeSize = 1;
@@ -96,33 +95,40 @@ int main() {
     // Dynamic sizing
     int RC_WIDTH = 512, RC_HEIGHT = 512;
 
-    // Stats, debounced
+    // Stats
     RadialStats stats;
     double last_stats_time = -1.0;
     const double STATS_INTERVAL = 0.25; // seconds between stat updates
-    bool stats_dirty = true;            // request stats after RC completes
+    
+    // Initialize async stats manager
+    static AsyncStatsManager g_stats_manager;
 
     // Perf instrumentation
     Perf perf;
     perf.init();
     static uint64_t frame_counter = 0;
 
-    // Fence for RC completion
-    GLsync rcFence = 0;
+    // Window resize debouncing
+    static double last_resize_time = 0.0;
+    const double RESIZE_DEBOUNCE = 0.1; // 100ms debounce
+
+    // Async RC execution - no fences needed
     auto kick_rc = [&](int w, int h) {
       g_gpu_renderer.run_full_rc(baseProbeSize, baseIntervalLength, NUM_CASCADES,
                                  glm::ivec2(w, h), &perf);
-
-      if (rcFence) { glDeleteSync(rcFence); rcFence = 0; }
-      rcFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-      stats_dirty = true;
+      
+      // Initialize and launch async stats computation (no blocking)
+      const int max_radius = int(glm::length(glm::vec2(float(w), float(h)) * 0.5f));
+      g_stats_manager.init(max_radius);
+      
+      GLuint outTex = g_gpu_renderer.resultTex();
+      g_stats_manager.dispatch_async(outTex, w, h);
     };
 
     // Initial RC run
     kick_rc(RC_WIDTH, RC_HEIGHT);
 
     ImPlotChartRenderer chartRenderer;
-
 
     // Track window size for dynamic updates
     int last_window_width = 0, last_window_height = 0;
@@ -139,55 +145,35 @@ int main() {
       perf.beginFrame(io.DeltaTime);
       frame_counter++;
 
-      // Check for window size changes and kick RC immediately (no debounce)
+      // Check for window size changes with debouncing
       int window_width, window_height;
       glfwGetWindowSize(window, &window_width, &window_height);
       if (window_width != last_window_width || window_height != last_window_height) {
         last_window_width = window_width;
         last_window_height = window_height;
-
-        int rc_width  = std::max(MIN_RC_WIDTH,  window_width  - IMGUI_PANEL_WIDTH - (PADDING * 3));
-        int rc_height = std::max(MIN_RC_HEIGHT, window_height - (PADDING * 2));
-        RC_WIDTH = rc_width;
-        RC_HEIGHT = rc_height;
-
-        kick_rc(RC_WIDTH, RC_HEIGHT);
+        last_resize_time = ImGui::GetTime();
+        
+        // Don't kick RC immediately, wait for debounce
       }
 
-      // If RC is in flight, poll fence; when ready, compute stats (debounced)
-      if (rcFence) {
-        GLenum res = glClientWaitSync(rcFence, 0, 0);
-        if (res == GL_ALREADY_SIGNALED || res == GL_CONDITION_SATISFIED) {
-          glDeleteSync(rcFence);
-          rcFence = 0;
-
-          // Debounced stats computation (from high-precision resultTex)
-          double now = ImGui::GetTime();
-          if (last_stats_time < 0.0 || (now - last_stats_time) >= STATS_INTERVAL) {
-            perf.beginCpuStats();
-            perf.beginGpuStats();
-            GLuint outTex = g_gpu_renderer.resultTex(); // RGBA32F
-            stats = compute_radial_stats_gpu(outTex, RC_WIDTH, RC_HEIGHT);
-            perf.endGpuStats();
-            perf.endCpuStats();
-
-            last_stats_time = now;
-            stats_dirty = false;
-          }
+      // Handle debounced resize
+      if (last_resize_time > 0.0 && (ImGui::GetTime() - last_resize_time) >= RESIZE_DEBOUNCE) {
+        int rc_width = std::max(MIN_RC_WIDTH, last_window_width - IMGUI_PANEL_WIDTH - (PADDING * 3));
+        int rc_height = std::max(MIN_RC_HEIGHT, last_window_height - (PADDING * 2));
+        
+        if (RC_WIDTH != rc_width || RC_HEIGHT != rc_height) {
+          RC_WIDTH = rc_width;
+          RC_HEIGHT = rc_height;
+          kick_rc(RC_WIDTH, RC_HEIGHT);
         }
-      } else if (stats_dirty) {
-        // If fence already passed earlier but stats were deferred by interval, compute now if interval elapsed
-        double now = ImGui::GetTime();
-        if (last_stats_time < 0.0 || (now - last_stats_time) >= STATS_INTERVAL) {
-          perf.beginCpuStats();
-          perf.beginGpuStats();
-          GLuint outTex = g_gpu_renderer.resultTex();
-          stats = compute_radial_stats_gpu(outTex, RC_WIDTH, RC_HEIGHT);
-          perf.endGpuStats();
-          perf.endCpuStats();
+        last_resize_time = 0.0; // Reset debounce
+      }
 
+      // Try to read previous frame's stats (non-blocking, async)
+      double now = ImGui::GetTime();
+      if (last_stats_time < 0.0 || (now - last_stats_time) >= STATS_INTERVAL) {
+        if (g_stats_manager.try_read_stats(stats, RC_WIDTH, RC_HEIGHT)) {
           last_stats_time = now;
-          stats_dirty = false;
         }
       }
 
@@ -316,15 +302,6 @@ int main() {
         glVertex2f((float)PADDING, (float)(PADDING + rc_display_height));
       glEnd();
 
-      // Show status indicator when RC is in flight
-      if (rcFence) {
-        glColor3f(1.0f, 1.0f, 0.0f);
-        glPointSize(10.0f);
-        glBegin(GL_POINTS);
-          glVertex2f((float)PADDING + 20.0f, (float)(PADDING + rc_display_height - 20.0f));
-        glEnd();
-      }
-
       // Perf overlay (frame counter + timing) in RC viewport top-left (screen-space)
       perf.drawOverlay(display_h,
                        PADDING, PADDING, rc_display_width, rc_display_height,
@@ -340,8 +317,9 @@ int main() {
       glfwSwapBuffers(window);
     }
 
+    // Cleanup async stats manager
+    g_stats_manager.cleanup();
 
-    if (rcFence) glDeleteSync(rcFence);
     perf.shutdown();
 
     ImGui_ImplOpenGL3_Shutdown();
@@ -351,7 +329,6 @@ int main() {
 
     glfwDestroyWindow(window);
     glfwTerminate();
-
 
   } catch (const std::exception& e) {
     std::cerr << "Exception caught: " << e.what() << std::endl;

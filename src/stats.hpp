@@ -20,7 +20,6 @@ struct RadialStats {
   std::vector<float> stddev_lower;
 };
 
-// Header-only GPU stats implementation (compute shader)
 static inline const char* kRadialStatsCS = R"(
 #version 430
 layout(local_size_x = 16, local_size_y = 16) in;
@@ -110,8 +109,152 @@ static inline void dispatch_radial_bins_compute(GLuint tex, int W, int H,
   glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
-// Convenience API: allocate SSBOs, dispatch compute, and read back immediately.
-// This is simple but can stall; for smoothness, prefer splitting dispatch and readback.
+class AsyncStatsManager {
+private:
+  GLuint ssbo_buffers_[6] = {0}; // Double-buffered: [count0, sum0, sumsq0, count1, sum1, sumsq1]
+  GLuint stats_program_ = 0;
+  int active_write_buffer_ = 0;
+  int max_radius_ = 0;
+  bool initialized_ = false;
+  
+public:
+  void init(int max_radius) {
+    if (initialized_ && max_radius_ == max_radius) return;
+    
+    cleanup();
+    max_radius_ = max_radius;
+    const size_t bins = max_radius + 1;
+    
+    glGenBuffers(6, ssbo_buffers_);
+    std::vector<uint32_t> zero(bins, 0u);
+    
+    for (int i = 0; i < 6; ++i) {
+      glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo_buffers_[i]);
+      glBufferData(GL_SHADER_STORAGE_BUFFER, bins * sizeof(uint32_t), 
+                  zero.data(), GL_DYNAMIC_DRAW);
+    }
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    
+    if (!stats_program_) {
+      stats_program_ = compileCS(kRadialStatsCS);
+    }
+    initialized_ = true;
+  }
+  
+  // Launch async stats computation (no readback)
+  void dispatch_async(GLuint tex, int W, int H) {
+    if (!initialized_) return;
+    
+    int write_base = active_write_buffer_ * 3;
+    
+    // Clear current write buffers
+    const size_t bins = max_radius_ + 1;
+    std::vector<uint32_t> zero(bins, 0u);
+    for (int i = 0; i < 3; ++i) {
+      glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo_buffers_[write_base + i]);
+      glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, bins * sizeof(uint32_t), zero.data());
+    }
+    
+    dispatch_radial_bins_compute(tex, W, H, 
+      ssbo_buffers_[write_base], ssbo_buffers_[write_base + 1], ssbo_buffers_[write_base + 2], 
+      stats_program_);
+    
+    // Let next frame read the just-written buffer
+    active_write_buffer_ = 1 - active_write_buffer_;
+  }
+  
+  // Try to read previous frame's results (non-blocking)
+  bool try_read_stats(RadialStats& out_stats, int W, int H) {
+    if (!initialized_) return false;
+    
+    int read_base = (1 - active_write_buffer_) * 3;
+    const size_t bins = max_radius_ + 1;
+    
+    // Read previous frame's compute results
+    GPUBins bins_data;
+    bins_data.count.resize(bins);
+    bins_data.sumQ.resize(bins);
+    bins_data.sumsqQ.resize(bins);
+    
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo_buffers_[read_base]);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, bins * sizeof(uint32_t), bins_data.count.data());
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo_buffers_[read_base + 1]);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, bins * sizeof(uint32_t), bins_data.sumQ.data());
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo_buffers_[read_base + 2]);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, bins * sizeof(uint32_t), bins_data.sumsqQ.data());
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    
+    // Convert to RadialStats
+    out_stats = convert_bins_to_stats(bins_data, W, H);
+    return true;
+  }
+  
+  void cleanup() {
+    if (initialized_) {
+      glDeleteBuffers(6, ssbo_buffers_);
+      memset(ssbo_buffers_, 0, sizeof(ssbo_buffers_));
+      if (stats_program_) {
+        glDeleteProgram(stats_program_);
+        stats_program_ = 0;
+      }
+      initialized_ = false;
+    }
+  }
+  
+  ~AsyncStatsManager() {
+    cleanup();
+  }
+
+private:
+  // Convert GPU bins to RadialStats structure
+  RadialStats convert_bins_to_stats(const GPUBins& bins, int W, int H) {
+    const int max_radius = int(glm::length(glm::vec2(float(W), float(H)) * 0.5f));
+    const float SCALE = 1048576.0f;
+
+    std::vector<float> radii;
+    std::vector<float> mean(max_radius + 1, 0.0f);
+    std::vector<float> stddev(max_radius + 1, 0.0f);
+    std::vector<float> stddev_upper;
+    std::vector<float> stddev_lower;
+    std::vector<int>   count(max_radius + 1, 0);
+    std::vector<float> ground_truth(max_radius + 1, 0.0f);
+
+    radii.reserve(max_radius + 1);
+    stddev_upper.reserve(max_radius + 1);
+    stddev_lower.reserve(max_radius + 1);
+
+    for (int r = 0; r <= max_radius; ++r) {
+      radii.push_back(float(r));
+      uint32_t n  = bins.count[size_t(r)];
+      count[r] = int(n);
+      if (n > 0u) {
+        float s  = float(bins.sumQ[size_t(r)]) / SCALE;
+        float ss = float(bins.sumsqQ[size_t(r)]) / SCALE;
+        float mu = s / float(n);
+        float var = std::max(ss / float(n) - mu * mu, 0.0f);
+        mean[r] = mu;
+        stddev[r] = std::sqrt(var);
+      }
+      stddev_upper.push_back(mean[r] + stddev[r]);
+      stddev_lower.push_back(std::max(mean[r] - stddev[r], 0.0f));
+    }
+
+    // Ground truth curve (plateau then inverse-square)
+    float disk_radius = 15.0f;
+    float peak = 1.0f;
+    for (int r = 0; r <= max_radius; ++r) {
+      if (r <= int(disk_radius)) {
+        ground_truth[r] = peak;
+      } else {
+        ground_truth[r] = peak * disk_radius * disk_radius / (float(r) * float(r) + 1e-3f);
+      }
+    }
+
+    return RadialStats{radii, mean, stddev, count, ground_truth, stddev_upper, stddev_lower};
+  }
+};
+
+// Legacy blocking API - kept for backward compatibility but not recommended for use
 static inline GPUBins compute_radial_bins_gpu(GLuint tex, int W, int H) {
   const int max_radius = int(glm::length(glm::vec2(float(W), float(H)) * 0.5f));
   const size_t bins = size_t(max_radius + 1);
@@ -151,52 +294,4 @@ static inline GPUBins compute_radial_bins_gpu(GLuint tex, int W, int H) {
 
   glDeleteBuffers(3, ssbo);
   return out;
-}
-
-static inline RadialStats compute_radial_stats_gpu(GLuint tex, int W, int H) {
-  const int max_radius = int(glm::length(glm::vec2(float(W), float(H)) * 0.5f));
-  const float SCALE = 1048576.0f;
-
-  auto bins = compute_radial_bins_gpu(tex, W, H);
-
-  std::vector<float> radii;
-  std::vector<float> mean(max_radius + 1, 0.0f);
-  std::vector<float> stddev(max_radius + 1, 0.0f);
-  std::vector<float> stddev_upper;
-  std::vector<float> stddev_lower;
-  std::vector<int>   count(max_radius + 1, 0);
-  std::vector<float> ground_truth(max_radius + 1, 0.0f);
-
-  radii.reserve(max_radius + 1);
-  stddev_upper.reserve(max_radius + 1);
-  stddev_lower.reserve(max_radius + 1);
-
-  for (int r = 0; r <= max_radius; ++r) {
-    radii.push_back(float(r));
-    uint32_t n  = bins.count[size_t(r)];
-    count[r] = int(n);
-    if (n > 0u) {
-      float s  = float(bins.sumQ[size_t(r)]) / SCALE;
-      float ss = float(bins.sumsqQ[size_t(r)]) / SCALE;
-      float mu = s / float(n);
-      float var = std::max(ss / float(n) - mu * mu, 0.0f);
-      mean[r] = mu;
-      stddev[r] = std::sqrt(var);
-    }
-    stddev_upper.push_back(mean[r] + stddev[r]);
-    stddev_lower.push_back(std::max(mean[r] - stddev[r], 0.0f));
-  }
-
-  // Ground truth curve (plateau then inverse-square)
-  float disk_radius = 15.0f;
-  float peak = 1.0f;
-  for (int r = 0; r <= max_radius; ++r) {
-    if (r <= int(disk_radius)) {
-      ground_truth[r] = peak;
-    } else {
-      ground_truth[r] = peak * disk_radius * disk_radius / (float(r) * float(r) + 1e-3f);
-    }
-  }
-
-  return RadialStats{radii, mean, stddev, count, ground_truth, stddev_upper, stddev_lower};
 }
